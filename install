@@ -1,0 +1,54 @@
+#!/usr/bin/perl
+
+use strict;
+use Shell qw(mkdir cp ln);
+
+print "creating dir structure\n";
+
+mkdir "-pv $ENV{HOME}/.ipod";
+mkdir "-pv $ENV{HOME}/.ipod/playlists";
+mkdir "-pv $ENV{HOME}/.ipod/backup";
+mkdir "-pv $ENV{HOME}/bin";
+
+print "copying binary\n";
+cp "-v SyncPOD $ENV{HOME}/bin";
+ln "$ENV{HOME}/bin/SyncPOD $ENV{HOME}/bin/sync_pod.pl";
+
+if(-e "$ENV{HOME}/.ipod/config") {
+  print "config already installed - leaving untouched\n";
+  print "merge for new options !!!\n";
+  exit;
+}
+
+my $conf=`cat config.in`;
+my %c;
+
+print "Enter the directory to keep in sync with your ipod: (absolute path)\n";
+$c{SYNCDIR}=<STDIN>;
+chomp $c{SYNCDIR};
+
+print "Enter the directory where your ipod is mounted: (absolute path)\n";
+$c{IPODDIR}=<STDIN>;
+chomp $c{IPODDIR};
+
+print "Enter the name of you ipod:\n";
+$c{IPODNAME}=<STDIN>;
+chomp $c{IPODNAME};
+
+print "Enter your name:\n";
+$c{REALNAME}=<STDIN>;
+chomp $c{REALNAME};
+
+print "Enter the name of your computer:\n";
+$c{COMPUTERNAME}=<STDIN>;
+chomp $c{COMPUTERNAME};
+
+for(keys %c) {
+  $conf =~ s/##$_##/\"$c{$_}\"/g;
+}
+
+print "creating config\n";
+open OUT,">$ENV{HOME}/.ipod/config";
+print OUT $conf;
+close OUT;
+

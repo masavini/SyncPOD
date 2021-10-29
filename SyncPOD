@@ -1,0 +1,862 @@
+#!/usr/bin/perl -w
+
+# (c) 2002 Armin Obersteiner <armin@xos.net>
+# License: GPL v2
+
+use MP3::Info;
+use Unicode::String qw( latin1 utf16 );
+use Shell qw ( find gzip );
+use Getopt::Std;
+use File::Copy;
+use Filesys::DiskFree;
+
+use Data::Dumper qw (Dumper);
+
+use strict;
+
+my $version="0.68";
+
+#
+# options & config
+#
+
+my %opt;
+getopts("fcnh",\%opt);
+
+if($opt{h}) {
+  print <<"EOF";
+$0 [-c] [-f] [Search Pattern 1] [Search Pattern 2] ...
+
+  -c  create: create directory structure on plain ipod before syncing
+      (default: you get a warning if there is no ipod structure)
+
+  -f  force: rename ipod and use it with $0 before syncing
+      (default: an unknown ipod stays untouched)
+ 
+  -n  name check: checks mp3 names for possible illegal characters
+ 
+  Search Patterns: for each search pattern a playlist is created
+                   (case insensitive)
+EOF
+  exit;
+}
+
+my $buffer = 5*1024*1024; # leave some MB free for iTunesDB
+
+my @required = qw ( SYNCMODE PLAYLISTDIR IPODDIR BACKUPDIR );
+
+my $rc=readrc("$ENV{HOME}/.ipod/config",\@required);
+
+#print Dumper($rc);
+
+
+#
+# check ipod name
+#
+
+my ($ipod_name, $real_name, $computer_name)=get_ipodname($rc->{IPODDIR});
+unless($ipod_name) {
+  die "IPOD dir not found: $rc->{IPODDIR}" unless $opt{c};
+}
+
+# 
+# check ipod dirs (recreate them if necessary)
+#
+
+mkdir "$rc->{IPODDIR}/iPod_Control",0755 unless(-d "$rc->{IPODDIR}/iPod_Control");
+mkdir "$rc->{IPODDIR}/iPod_Control/Music",0755 unless(-d "$rc->{IPODDIR}/iPod_Control/Music");
+mkdir "$rc->{IPODDIR}/iPod_Control/iTunes",0755 unless(-d "$rc->{IPODDIR}/iPod_Control/iTunes");
+mkdir "$rc->{IPODDIR}/iPod_Control/Device",0755 unless(-d "$rc->{IPODDIR}/iPod_Control/Device");
+for(0..19) {
+  my $d=sprintf "%.2d",$_;
+  mkdir "$rc->{IPODDIR}/iPod_Control/Music/F$d",0755 unless(-d "$rc->{IPODDIR}/iPod_Control/Music/F$d");
+}
+
+unless($opt{c}) {
+  print STDERR "IPOD name: $ipod_name\n";
+  print STDERR "Synced by: $real_name\n";
+  print STDERR "Synced on: $computer_name\n";
+
+  if($rc->{WRITEDEVICEINFO} && !$opt{f}) {
+    my $exit=0;
+    unless($rc->{IPODNAME} eq $ipod_name) {
+      $exit=1;
+      print STDERR "Your IPOD name: $rc->{IPODNAME}\n";
+    }
+    unless($rc->{REALNAME} eq $real_name) {
+      $exit=1;
+      print STDERR "Your real name: $rc->{REALNAME}\n";
+    }
+    unless($rc->{COMPUTERNAME} eq $computer_name) {
+      $exit=1;
+      print STDERR "Your computer:  $rc->{COMPUTERNAME}\n";
+    }
+    die "names mismatch, use -f to override" if $exit;
+  }
+  print STDERR "\n";
+}
+
+#
+# write ipod name
+#
+
+if($rc->{WRITEDEVICEINFO}) {
+  set_ipodname(
+    $rc->{IPODDIR},$rc->{BACKUPDIR},
+    $rc->{IPODNAME},$rc->{REALNAME},$rc->{COMPUTERNAME}
+  );
+  $ipod_name=$rc->{IPODNAME};
+}
+
+#
+# check for songs
+#
+
+my %songs;
+my %check;
+
+my $dir;
+$dir=$rc->{IPODDIR}."/iPod_Control/Music";
+$dir=$rc->{SYNCDIR} if($rc->{SYNCMODE} >= 2);
+
+my %tosync;
+if(($rc->{SYNCLIST}) && ($rc->{SYNCMODE} == 2)) {
+  open IN,$rc->{SYNCLIST} or die "all-playlist: $rc->{SYNCLIST} not found";
+  while(<IN>) {
+    chomp;
+    $tosync{$_}=1;
+  } 
+  close IN;
+}
+
+my @mp3s;
+if(($rc->{SYNCMODE} == 3)) {
+  my @pl=find("$rc->{PLAYLISTDIR}/* 2>/dev/null");
+  my %test;
+
+  for my $p (@pl) {
+    chomp $p;
+    my ($n) = $p =~ /.*\/(.*?)$/;
+    open IN,$p or die "playlist: $p could not be opened";
+    while(<IN>) {
+      unless($test{$_}) {
+        push @mp3s,$_;
+        $test{$_}=1;
+      }
+    }
+  } 
+} else { 
+  @mp3s=find($dir);
+}
+
+for(@mp3s) {
+  chomp $_;
+  next unless(/\.(m|M)(p|P)3$/);
+  my $name=$_;
+
+  if(keys %tosync) {
+    next unless($tosync{$name});
+  }
+
+  if($opt{n}) {
+    die "illegal character in filename [$name]\n" unless ($name =~ /^[A-Za-z0-9\.\-_\/\,]+$/);
+  }
+
+  s/\://g;
+  s/.*\///g;
+  $songs{$name}{name}=$_;
+  if($rc->{SYNCMODE} >= 2) {
+    $songs{$name}{dir}="F".hash($_);
+  } else {
+    ($songs{$name}{dir}) = $name =~ /\/(F\d\d)\//;
+  }
+
+  {
+    my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
+        $atime,$mtime,$ctime,$blksize,$blocks) = stat($name);
+    $songs{$name}{size}=$size;
+    $songs{$name}{date}=$mtime;
+  }
+
+  my $tag;
+  $tag = get_mp3tag($name) unless($rc->{ALWAYSTEMPLATES});
+
+  my ($artist,$album,$title,$order,$_dummy_);
+
+  if($tag) {
+    # print Dumper($tag);
+    # YEAR ARTIST COMMENT TRACKNUM TITLE ALBUM GENRE
+    $artist=$tag->{ARTIST};
+    $album=$tag->{ALBUM};
+    $title=$tag->{TITLE};
+    $order=$tag->{TRACKNUM};
+    $order=$1 if($order =~ /(\d+)\s*\//);
+
+  } else {
+    for(sort {length($b) <=> length($a)} keys %{$rc->{FILETEMPLATES}}) {
+      if(my @x = $name =~ /$_/) {
+        my $c=0;
+        for my $x (@x) {
+          #print "\$$rc->{FILETEMPLATES}->{$_}->[$c]=\"$x\";\n";
+          eval "\$$rc->{FILETEMPLATES}->{$_}->[$c]=\"$x\";";
+          die "eval error: $@" if($@);
+          $c++;
+        }
+        last;
+      } 
+    }
+  }
+
+  unless($title) {
+    die "no title found in: $name";
+  }
+
+  $title =~ s/_/ /g;
+  $artist =~ s/_/ /g;
+  $album =~ s/_/ /g;
+
+  $songs{$name}{title}=$title;
+  $songs{$name}{artist}="";
+  $songs{$name}{album}="";
+  $songs{$name}{order}=0;
+  $songs{$name}{artist}=$artist if $artist;
+  $songs{$name}{album}=$album if $album;
+  $songs{$name}{order}=$order if $order;
+
+  my $info = get_mp3info ($name);
+
+  $songs{$name}{size}=$info->{SIZE};
+  $songs{$name}{bitrate}=$info->{BITRATE};
+  $songs{$name}{duration}=int($info->{SECS}*1000);
+  $songs{$name}{vbr}=$info->{VBR};
+
+  #print Dumper($info);
+
+  my $n=$songs{$name}{dir}."/".$songs{$name}{name};  
+  unless($check{$n}) {
+    $check{$n}=1;
+  } else {
+    die "songname: $songs{$name}{name} not unique";
+  }
+}
+
+#
+# deleting unwanted songs
+#
+
+my %known;
+for(keys %songs) {
+  $known{$songs{$_}{name}}=1;
+}
+
+#print Dumper(\%known);
+
+my @ipod = find ("$rc->{IPODDIR}/iPod_Control/Music");
+my @todel;
+for(@ipod) {
+  next unless (/\.mp3$/i);
+  chomp;
+
+  my ($name) = $_ =~ /\/([^\/]+\.mp3)$/i;
+  unless($known{$name}) {
+    push @todel,$_;
+  }
+}
+
+my $del;
+if($rc->{DELETEASK} && @todel) {
+  for(@todel) {
+    print "del: $_\n";
+  }
+  print "Do you really want to delete this songs? (y/N) ";
+  my $in=<STDIN>;
+  chomp $in;
+  $del=1 if($in =~ /^y$/i);
+} else {
+  $del=1;
+}
+
+if($del) {
+  for(@todel) {
+    print STDERR "deleting: $_\n";
+    unlink($_);
+  }
+}
+
+#
+# copy songs
+#
+
+my $main_sl="";
+my $main_pl="";
+my $index=500;
+
+#print Dumper(\%songs);
+
+my $df = new Filesys::DiskFree;
+
+SONGS: for my $song (keys %songs) {
+  my $attr;
+  my $out=""; 
+  my $attr_c=3;
+
+  if($rc->{SYNCMODE} >= 2) {
+    my $to = "$rc->{IPODDIR}/iPod_Control/Music/$songs{$song}{dir}/$songs{$song}{name}";
+    #my ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
+    #    $atime,$mtime,$ctime,$blksize,$blocks) = stat($to);
+    #$size=0 unless $size;
+    #print "checking: $song [$songs{$song}{size}] -> $to [$size]\n";
+    #if($size != $songs{$song}{size}) { 
+
+    unless(-e $to) {
+      print STDERR "syncing: $songs{$song}{name}\n";
+      # cp "\"$song\" \"$to\"";
+      
+      $df->df();
+      my $free=$df->avail($rc->{IPODDIR}); 
+
+      if($free-$songs{$song}{size}-$buffer>0) { 
+        copy($song,$to);
+      } else {
+        print STDERR "no space availiable for: $songs{$song}{name} [$songs{$song}{size}]\n";
+        delete $songs{$song};
+        next SONGS;
+      }
+    }
+  }
+
+  $songs{$song}{index}=$index;
+
+  $out.=create_mhod($songs{$song}{title},1);  
+
+  if($songs{$song}{artist}) {
+    $attr_c++;
+    $out.=create_mhod($songs{$song}{artist},4);
+  }
+  if($songs{$song}{album}) {
+    $attr_c++;
+    $out.=create_mhod($songs{$song}{album},3);
+  }
+
+  $out.=create_mhod("MPEG audio file",6);  
+  $out.=create_mhod(":iPod_Control:Music:".$songs{$song}{dir}.":".$songs{$song}{name},2);  
+
+  $out=create_mhit(
+    $attr_c,length($out),$index,$songs{$song}{vbr},
+    $songs{$song}{date},$songs{$song}{size},
+    $songs{$song}{duration},$songs{$song}{order},
+    $songs{$song}{bitrate}
+  ).$out;
+
+  $main_sl.=$out;
+
+  $main_pl.=create_mhod_mhip($songs{$song}{index});
+
+  $index++;
+}
+
+#print Dumper(\%songs);
+
+my %playlists;
+my @pl=find("$rc->{PLAYLISTDIR}/* 2>/dev/null");
+
+for my $p (@pl) {
+  chomp $p;
+  my ($n) = $p =~ /.*\/(.*?)$/;
+  open IN,$p or die "playlist: $p could not be opened";
+  while(<IN>) {
+    my $song=$_;
+    chomp $song;
+
+    unless($songs{$song}) {
+      print STDERR "ignoring song in playlist [$p], [$song] does not exist in syncdir or ipod full\n";
+    } else {
+      $playlists{$n}{raw}.=create_mhod_mhip($songs{$song}{index});
+      $playlists{$n}{count}++;
+    }
+  }
+  close IN;
+}
+
+#
+# creating search pattern playlists
+#
+
+for my $pattern (@ARGV) {
+  my @list;
+  for(keys %songs) {
+    push @list,$songs{$_}{index} if($_ =~ /$pattern/i);
+  }
+  unless(@list) {
+    print STDERR "nothing for searchpattern: $pattern found\n";
+  } else {
+    my ($name)=$pattern=~/(\S\S\S+)/;
+    unless(length($name)>=3) {
+      $name=$pattern;
+      $name =~ s/[^A-Za-z0-9]//g;
+    }
+    for(@list) {
+      $playlists{$name}{raw}.=create_mhod_mhip($_);
+      $playlists{$name}{count}++;
+    }
+    print STDERR @list." songs for searchpattern: $pattern found\n";
+  }
+}
+ 
+#print Dumper(\%playlists);
+
+#
+# build the pieces together
+#
+
+my $output;
+
+my $song_c=keys %songs;
+
+print STDERR "\nFound songs: $song_c\n";
+
+my $tmp=create_mhlt($song_c).$main_sl;
+$main_sl=create_mhsd(96+length($tmp),1).$tmp;
+
+print STDERR "Songlist created\n";
+
+my $pl_c=keys %playlists;
+
+print STDERR "\nFound additional playlists: $pl_c\n";
+
+$tmp=create_mhlp($pl_c+1).create_playlist_main($ipod_name,$song_c).$main_pl;
+print STDERR "\nMain playlist created: $song_c songs\n\n";
+
+for(keys %playlists) {
+  $tmp.=create_playlist($_,$playlists{$_}{count}).$playlists{$_}{raw};
+  print STDERR "Playlist \"$_\" created: $playlists{$_}{count} songs\n";
+}
+
+$main_pl=create_mhsd(96+length($tmp),2).$tmp;
+
+
+$output=create_mhbd(104+length($main_sl.$main_pl)).$main_sl.$main_pl;
+
+# backup old iTunesDB
+if(-e "$rc->{IPODDIR}/iPod_Control/iTunes/iTunesDB") {
+  my $t=time();
+  copy("$rc->{IPODDIR}/iPod_Control/iTunes/iTunesDB","$rc->{BACKUPDIR}/iTunesDB_$t");
+  gzip("$rc->{BACKUPDIR}/iTunesDB_$t");
+}
+
+open OUT,">".$rc->{IPODDIR}."/iPod_Control/iTunes/iTunesDB" or die "cannot write iTunesDB";
+print OUT $output;
+close OUT;
+
+print STDERR "\niTunesDB created.\n";
+exit;
+# END
+
+
+#
+# internal subroutines
+#
+
+sub create_mhbd {
+  my ($size) = @_;
+
+  my $r= "mhbd";
+  $r.= pack "V",104;
+  $r.= pack "V",$size;
+  $r.= pack "V",1;
+  $r.= pack "V",1;
+  $r.= pack "V",2;
+  for(1..20) {
+    $r.= pack "V",0;
+  }
+  
+  return $r;
+}
+
+sub create_mhlp {
+  my ($count) = @_;
+
+  my $r= "mhlp";
+  $r.= pack "V",92;
+  $r.= pack "V",$count;
+  for(1..20) {
+    $r.= pack "V",0;
+  }
+
+  return $r;
+}
+ 
+sub create_playlist {
+  my ($name,$anz) = @_;
+
+  my $ipod_name=create_mhod($name,1);
+
+  my $r= "mhyp";
+  $r.= pack "V",108;
+  $r.= pack "V",108+648+length($ipod_name)+$anz*(76+44);
+  $r.= pack "V",2;
+  $r.= pack "V",$anz;
+  $r.= pack "V",0;
+  $r.= pack "V",3088620292;
+  $r.= pack "V",2317718671;
+  $r.= pack "V",3655876446;
+  for(1..18) {
+    $r.= pack "V",0;
+  }
+
+  $r.= "mhod";
+  $r.= pack "V",24;
+  $r.= pack "V",648;
+  $r.= pack "V",100;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",12714187; # ?? 12714187
+  $r.= pack "V",26215000;
+  $r.= pack "V",0;
+  $r.= pack "V",65736;
+  $r.= pack "V",1; # ?? 1
+  $r.= pack "V",6; # ?? 6
+  $r.= pack "V",0; # ?? 0
+  $r.= pack "V",2555905; # ?? 2555905
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",13107202;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",3276813;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",8192004;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",8192003;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",5242888;
+  for(1..107) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",140;
+  for(1..19) {
+    $r.= pack "V",0;
+  }
+
+  return $r.$ipod_name;
+}
+
+sub create_playlist_main {
+  my ($name,$anz) = @_;
+
+  my $ipod_name=create_mhod($name,1);
+
+  my $r= "mhyp";
+  $r.= pack "V",108;
+  $r.= pack "V",108+648+length($ipod_name)+$anz*(76+44);
+  $r.= pack "V",2;
+  $r.= pack "V",$anz;
+  $r.= pack "V",1;
+  $r.= pack "V",3087491191;
+  $r.= pack "V",837788566;
+  $r.= pack "V",62365;
+  for(1..18) {
+    $r.= pack "V",0;
+  }
+
+  $r.= "mhod";
+  $r.= pack "V",24;
+  $r.= pack "V",648;
+  $r.= pack "V",100;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",13172927; # ?? 12714187
+  $r.= pack "V",26215000;
+  $r.= pack "V",0;
+  $r.= pack "V",65736;
+  $r.= pack "V",5; # ?? 1
+  $r.= pack "V",6; # ?? 6
+  $r.= pack "V",3; # ?? 0
+  $r.= pack "V",1179649; # ?? 2555905
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",13107202;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",3276813;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",8192004;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",8192003;
+  for(1..3) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",5242888;
+  for(1..107) {
+    $r.= pack "V",0;
+  }
+  $r.= pack "V",140;
+  for(1..19) {
+    $r.= pack "V",0;
+  }
+
+  return $r.$ipod_name;
+}
+
+sub create_mhod_mhip {
+  my ($ref) = @_;
+
+  my $r= "mhip";  
+  $r.= pack "V",76;
+  $r.= pack "V",76;
+  $r.= pack "V",1;
+  $r.= pack "V",0;
+  $r.= pack "V",$ref-1;
+  $r.= pack "V",$ref;
+  $r.= pack "V",3088619525;
+  for(1..11) {
+    $r.= pack "V",0;
+  }
+
+  $r.="mhod";
+  $r.= pack "V",24;
+  $r.= pack "V",44;
+  $r.= pack "V",100;
+  $r.= pack "V",0;
+  $r.= pack "V",0;
+  $r.= pack "V",$ref-1;
+  for(1..4) {
+    $r.= pack "V",0;
+  }
+
+  return $r;
+}
+
+sub create_mhsd {
+  my ($size,$type) = @_;
+
+  my $r="mhsd";
+  $r.= pack "V",96;
+  $r.= pack "V",$size;
+  $r.= pack "V",$type;
+  for(1..20) {
+    $r.= pack "V",0;
+  }
+
+  return $r;
+}
+
+sub create_mhlt {
+  my ($count) = @_;
+  
+  my $r="mhlt";
+  $r.= pack "V",92;
+  $r.= pack "V",$count;
+  for(1..20) {
+    $r.= pack "V",0;
+  }
+
+  return $r;
+}
+
+sub create_mhit {
+  my ($arttr_c,$attr_s,$index,$vbr,$date,$size,$dur,$order,$bitrate) = @_;
+
+  my $r="mhit";
+  $r.= pack "V",156;
+  $r.= pack "V",156+$attr_s;
+  $r.= pack "V",$arttr_c;
+  $r.= pack "V",$index;
+  $r.= pack "V",1;
+  $r.= pack "V",0;
+  my $type=256;
+  $type+=1 if($vbr);
+  $r.= pack "V",$type;
+  $r.= pack "V",$date+2082844800;
+  $r.= pack "V",$size;
+  $r.= pack "V",$dur;
+  $r.= pack "V",$order;
+  $r.= pack "V",0;
+  $r.= pack "V",0;
+  $r.= pack "V",$bitrate;
+  $r.= pack "V",2890137600;
+  for(1..23) {
+    $r.= pack "V",0;
+  }
+
+  return $r;
+}
+
+sub create_mhod {
+  my ($string,$type) = @_;
+  my $len=length($string);
+
+  my $r="mhod";
+  $r.= pack "V",24;
+  $r.= pack "V",(40+2*$len);
+  $r.= pack "V",$type;
+  $r.= pack "V2",0;
+  $r.= pack "V",1;
+  $r.= pack "V",(2*$len);
+  $r.= pack "V2",0;
+
+  my $u=latin1($string);
+  $u->byteswap;
+  $r.= $u->utf16;
+
+  return $r;
+}
+
+sub set_ipodname {
+  my ($dev,$backup,$name,$real,$cpu)=@_;
+  $dev.="/iPod_Control/iTunes/DeviceInfo";
+
+  my $file;
+
+  for(1..384) {
+    $file.=pack "V",0;
+  }
+
+  my $l=length($name);
+  substr($file,0,2)=pack "v",$l;
+  my $u=latin1($name);
+  $u->byteswap;
+  substr($file,2,$l*2)=$u->utf16;
+
+  $l=length($real);
+  substr($file,512,2)=pack "v",$l;
+  $u=latin1($real);
+  $u->byteswap;
+  substr($file,514,$l*2)=$u->utf16;
+
+  $l=length($cpu);
+  substr($file,1024,2)=pack "v",$l;
+  $u=latin1($cpu);
+  $u->byteswap;
+  substr($file,1026,$l*2)=$u->utf16;
+
+  if(-e $dev) {
+    my $t=time();
+    copy($dev,"$backup/DeviceInfo_$t");
+    gzip("$backup/DeviceInfo_$t");
+  }
+  open IPOD,">$dev" or die "cannot write DeviceInfo";
+  print IPOD $file;
+  close IPOD;
+}
+
+sub get_ipodname {
+  my $dev=shift;
+  $dev.="/iPod_Control/iTunes/DeviceInfo";
+  my $file;
+  my $buff;
+
+  open IPOD,$dev or return undef;
+  while (read(IPOD, $buff, 8 * 2**10)) {
+    $file.=$buff;
+  }
+  close IPOD;
+
+  my $l=unpack "v",substr($file,0,2);
+  my $s=substr($file,2,$l*2);
+  my $u=utf16($s);
+  $u->byteswap;
+  my $name=$u->latin1;
+
+  $l=unpack "v",substr($file,512,2);
+  $s=substr($file,514,$l*2);
+  $u=utf16($s);
+  $u->byteswap;
+  my $realname=$u->latin1;
+
+  $l=unpack "v",substr($file,1024,2);
+  $s=substr($file,1026,$l*2);
+  $u=utf16($s);
+  $u->byteswap;
+  my $computername=$u->latin1;
+
+  return ($name,$realname,$computername);
+}
+
+sub hash {
+  my $string=shift;
+  my $key; 
+
+  my $len=length($string);
+
+  for(my $j=$len-1 ; $j>1 ; $j--) {
+    $key+=ord(substr($string,$j,1));
+  }
+
+  return sprintf "%.2d",(substr($key,length($key)-2,2) % 20);
+}
+
+sub readrc {
+  my $file = shift;
+  my $req = shift;
+  my $rc;
+
+  my $sub;
+
+  open IN,$file or die "cannot open rc file: $file";
+  while(<IN>) {
+    next if /^\s*$/;
+    next if /^\s*#/;
+
+    if(/^\s*(\S+)\s*=\s*(.*?)\s*$/) {
+      my $k=$1;
+      my $n=$2;
+      ($n) = $n =~ /^\"(.*?)\"$/ if($n =~ /\"/);
+      unless($sub) {
+        $rc->{$k}=$n;
+      } else {
+        ($k) = $k =~ /^\"(.*?)\"$/ if($k =~ /\"/);
+        my @n=split /,/,$n;
+        for(@n) {
+          s/^\s+//g;
+          s/\s+$//g;
+          s/^\"//;
+          s/\"$//;
+        }
+        $rc->{$sub}->{$k}=\@n;
+      }
+    } elsif (/^\s*(\S+)\s*\{/) {
+      $sub=$1;
+    } elsif (/^\s*}/) {
+      $sub=undef;
+    }
+  }
+
+  if($rc->{SYNCMODE} == 2) {
+    push @$req,"SYNCDIR";
+  }
+  if($rc->{WRITEDEVICEINFO} == 1) {
+    push @$req,("IPODNAME","REALNAME","COMPUTERNAME");
+  }
+  if($rc->{ALWAYSTEMPLATES} == 1) {
+    push @$req,"FILETEMPLATES";
+  }
+
+  for my $d (keys %$rc) {
+    if($d =~ /DIR$/) {
+      $rc->{$d} =~ s/\~/$ENV{HOME}/;
+    }
+  }
+  $rc->{SYNCLIST} =~ s/\~/$ENV{HOME}/ if $rc->{SYNCLIST};
+
+  for(@$req) {
+    die "RC PARAMETER: $_ not found" unless($rc->{$_});
+  } 
+  return $rc;
+}

@@ -1,0 +1,61 @@
+SyncIPOD 0.63
+=============
+
+I take no responsibility for ANYTHING! 
+Read the COPYING file.
+
+You need:
+
+  * an ipod ;-) [FAT32 ipod]
+  * a kernel with firewire and scsi [latest ieee1394 modules]
+  * Perl5 [modules: MP3::Info, Unicode::String, File::Copy, Filesys::DiskFree]
+
+You get:
+
+  * syncronisation with
+
+    a) a local directory (recommended: just a dir of links)
+    b) a master playlist (directory + a filtering playlist, needed when the
+       directory is larger than you ipod)
+    c) just playlists, which point anywhere within your mounted filesystems
+
+  * optional playlists
+
+  * on the fly created playlists
+
+  * mp3 info from
+
+    a) mp3 tags
+    b) filenames
+
+To install:
+
+  Type "./install"
+  Then look at "~/.ipod/config" and check your configuration.
+
+To uninstall:
+
+  Remove the directory: ~/.ipod and the files ~/bin/SyncPOD and ~/bin/sync_pod.pl
+
+To use the program:
+
+  Type "SyncPOD" or "sync_pod.pl" and let your mp3's sync to your ipod.
+  If your ipod has no filesystem structure use "SyncPOD -c" to create it and sync
+  later. Using your ipod for the first time (with this program and an existing
+  filesystem structure) you may need to use: "SyncPOD -f" to christian it.
+  (Or you DON'T use this command, if you don't want to sync THIS ipod.)
+
+More info: <http://armin.emx.at/ipod/>
+
+If this program creates iTunesDB files that do NOT work, do the following:
+
+  a) write a description of what does not work
+  b) get the full output of the SyncPOD command (stdout and stderr)
+  c) get the full output of the following (stdout and stderr) - if it loops kill the process
+
+    DumpPOD <iTunesDB file>
+
+and send it to me. (armin [at] xos [dot] net)
+
+Enjoy. 
+

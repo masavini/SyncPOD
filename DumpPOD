@@ -1,0 +1,233 @@
+#!/usr/bin/perl
+
+# (c) 2002 Armin Obersteiner <armin@xos.net>
+# License: GPL v2
+
+use Unicode::String qw( utf16 );
+use Getopt::Std;
+
+use strict;
+use vars qw( $c %opt );
+
+my $version="0.9";
+
+my $file;
+my $buff;
+
+getopts("d",\%opt);
+
+open IN,$ARGV[0];
+while (read(IN, $buff, 8 * 2**10)) {
+  $file.=$buff;
+}
+close IN;
+
+my $attr = {
+  song => {
+    1 => "title",
+    2 => "filename",
+    3 => "album?",
+    4 => "artist?",
+    5 => "genre/eq?",
+    6 => "filetype",
+    8 => "creator"
+  },
+  list => {
+    1 => "songlist",
+    2 => "playlist"
+  }
+};
+
+parse_section($file,"MAIN");
+
+exit;
+
+sub get_size {
+  my $file=shift;
+
+  my $head=substr($file,0,4);
+  my $hsize=substr($file,4,4);
+  my $size=substr($file,8,4);
+
+  $hsize=unpack "V",$hsize;
+  $size=unpack "V",$size;
+
+  $size=length($file) if($head eq "mhlt");
+  $size=length($file) if($head eq "mhlp");
+
+  #print "size: $size [$head] [$hsize] [$size]\n";
+  return $size;
+}
+
+sub parse_section {
+  my $file=shift;
+  my $ohead=shift;
+
+  my @f=();
+  my $done;
+  while(!$done) {
+    my $size=get_size($file);
+    push @f,substr($file,0,$size);
+    $file=substr($file,$size);
+    $done=1 if(length($file)<=0);
+    $done=1 if($size<=0);
+  }
+
+  #for(@f) {
+  #  my $head=substr($_,0,4);
+  #  my $l=length($_);
+  #  print "dump: $head $l\n";
+  #}
+
+  for(@f) {
+    my $file=$_;
+
+    my $head=substr($file,0,4);
+    my $hsize=substr($file,4,4);
+    my $size=substr($file,8,4);
+    my $len=length($file);
+
+    #next unless($head =~ /^mh/);
+
+    $hsize=unpack "V",$hsize;
+    $size=unpack "V",$size;
+
+    #$size=$hsize if($size<$hsize);
+    $size=get_size($file);
+
+    #print "got: $head [$hsize] [$size] [$len]\n";
+
+    if($opt{d}) {
+      $c++;
+      my $n=sprintf "%.4d",$c;
+      my $s=$hsize;
+      $s=$size if($head eq "mhod");
+      open OUT,">dump_$n";
+      print OUT substr($file,0,$s);
+      close OUT;
+    }
+
+    # do parsing
+
+    if($head eq "mhbd") {
+      print "got: main db element [$head] [$hsize] [$size] [$len]\n";
+      my ($a1,$a2,$a3) = unpack "V4V4V4",substr($file,12,12);
+      print "got: ????:  $a1\n";
+      print "got: ????:  $a2\n";
+      print "got: ????:  $a3\n";
+
+    } elsif($head eq "mhsd") {
+      print "got: main list element [$head] [$hsize] [$size] [$len]\n";
+      my ($type) = unpack "V4",substr($file,12,4);
+      my $t=$attr->{list}->{$type};
+      print "got: type: $t [$type]\n";
+
+    } elsif($head eq "mhlt") {
+      print "got: list element [$head] [$hsize] [$size] [$len]\n";
+      my ($count) = unpack "V4",substr($file,8,4);
+      print "got: songs: $count\n";
+
+    } elsif($head eq "mhlp") {
+      print "got: playlist element [$head] [$hsize] [$size] [$len]\n";
+      my ($count) = unpack "V4",substr($file,8,4);
+      print "got: playlists: $count\n";
+
+    } elsif($head eq "mhit") {
+      print "got: song item element [$head] [$hsize] [$size] [$len]\n";
+      my ($count,$ind,$a3,$a4,$type,$date,$size,$dur,$order,
+          $a10,$a11,$a12,$a13)=
+        unpack "V4V4V4V4V4V4V4V4V4V4V4V4V4",substr($file,12,72);
+      print "got: $count attribute elements\n";
+      print "got: index: $ind\n";
+      print "got: ????:  $a3\n";
+      print "got: ????:  $a4\n";
+      print "got: type:  $type [256=normal, 257=VBR ?]\n";
+      my $date_o=$date;
+      $date=$date-2082844800;
+      my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) =
+        localtime($date);
+      $year+=1900;
+      $mon+=1;
+      my $d=sprintf "%.4d/%.2d/%.2d %.2d:%.2d:%.2d",$year,$mon,$mday,$hour,$min,$sec;
+      print "got: date:  $d [$date_o]\n";
+      print "got: size:  $size\n";
+      my $h=int(($dur/1000)/60/60);
+      my $m=int(($dur/1000)/60)-60*$h;
+      my $s=int(($dur/1000))-60*$m;
+      my $r=substr($dur,length($dur)-3);
+      my $d=sprintf "%.2d:%.2d:%.2d.%s",$h,$m,$s,$r;
+      print "got: dur:   $d [$dur]\n";
+      print "got: order: $order\n";
+      print "got: ????:  $a10\n";
+      print "got: ????:  $a11\n";
+      print "got: bitrate:  $a12 ?\n";
+      print "got: ????:  $a13\n";
+
+    } elsif($head eq "mhod") {
+      print "got: attribute element [$head] [$hsize] [$size] [$len]\n";
+      my ($type,$a2,$a3,$a4,$siz)=
+        unpack "V4V4V4V4V4",substr($file,12,20);
+      my $t="special";
+      $t=$attr->{song}->{$type} if($attr->{song}->{$type});
+      print "got: type: $t [$type]\n"; 
+      if($type == 100) {
+        print "got: not a string element\n";
+        print "got: ????: $a2\n";
+        print "got: ????: $a3\n";
+        print "got: ????: $a4\n";
+        print "got: size: $siz (?)\n";
+        for(my $i=32; $i<$size; $i+=4) {
+          my $x=unpack "V",substr($file,$i,4);
+          print "got: ????: $x [$i]\n" if $x;
+        }
+      } else {
+        print "got: ????: $a4\n"; 
+        my $s=substr($file,40,$siz);
+        my $u=utf16($s);
+        $u->byteswap;
+        my $ustr=$u->latin1;
+        my $l=length $ustr;
+        print "got: size: $l [$size]\n"; 
+        print "got: ustr: $ustr\n" if $ustr;
+      }
+
+    } elsif($head eq "mhyp") {
+      print "got: playlist info [$head] [$hsize] [$size] [$len]\n";
+      my ($attr,$count,$a3,$a4,$a5,$a6,$a7,$a8,$a9,
+          $a10,$a11,$a12,$a13)=
+        unpack "V4V4V4V4V4V4V4V4V4V4V4V4V4",substr($file,12,72);
+      print "got: attributes:  $attr\n";
+      print "got: songs:  $count\n";
+      print "got: ????:  $a3\n";
+      print "got: ????:  $a4\n";
+      print "got: ????:  $a5\n";
+      print "got: ????:  $a6\n";
+
+    } elsif($head eq "mhip") {
+      print "got: playlist item element [$head] [$hsize] [$size] [$len]\n";
+      my ($a1,$a2,$a3,$ref,$a5,$a6,$a7,$a8,$a9,
+          $a10,$a11,$a12,$a13)=
+        unpack "V4V4V4V4V4V4V4V4V4V4V4V4V4",substr($file,12,72);
+      print "got: ????:  $a1\n";
+      print "got: ????:  $a2\n";
+      print "got: ????:  $a3\n";
+      print "got: reference:  $ref\n";
+      print "got: ????:  $a5\n";
+ 
+    } else {
+      print "error: unknown header: $head\n";
+    }
+
+    print "\n";
+
+    # recursion
+
+    unless(($head eq "mhod") || ($head eq "mhip")) {
+      #print "rec: $hsize,".($size-$hsize)."\n";
+      my $f=substr($file,$hsize,$size-$hsize);
+      parse_section($f,$head);
+    }
+  }
+}
+
+

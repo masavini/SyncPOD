@@ -1,0 +1,92 @@
+#
+# IPOD RC
+#
+
+# DELETEASK
+#
+# ask when deleting files
+
+DELETEASK = 1
+
+# SYNCMODE: mode to sync ipod with
+#
+# 1: just use IPODs directory (untested)
+# 2: sync local drirectory with ipod
+# 3: just use playlists for syncing
+
+SYNCMODE = 2
+
+# SYNCDIR: directory to sync with ipod
+#
+# needed in SYNCMODE 2
+
+SYNCDIR = ##SYNCDIR##
+
+# SYNCLIST: playlist with ALL songs to sync with ipod
+#
+# optional in SYNCMODE 2
+
+#SYNCLIST = "~/.ipod/ALLSONGS"
+
+# PLAYLISTDIR
+#
+# directory of further ipod playlists (all files will be treated
+# as playlists)
+
+PLAYLISTDIR = "~/.ipod/playlists"
+
+# IPODDIR
+#
+# directory where ipod is mounted
+
+IPODDIR = ##IPODDIR##
+
+# WRITEDEVICEINFO
+#
+# write ipods name to ipod
+
+WRITEDEVICEINFO = 1
+
+# IPODNAME
+#
+# name of you IPOD
+
+IPODNAME = ##IPODNAME##
+
+# REALNAME
+#
+# your name
+
+REALNAME = ##REALNAME##
+
+# COMPUTERNAME
+#
+# the name of your computer
+
+COMPUTERNAME = ##COMPUTERNAME##
+
+# FILETEMPLATES
+#
+# templates to get title/artist/album/order from 
+# filenames
+
+FILETEMPLATES {
+  # Various_Artists.Pretty_Woman-11-Red_Hot_Chilli_Pepper-Show_Me_Your_Soul.mp3
+  ".*\/(\S+?)\.(\S+?)-(\d+)-(\S+?)-(\S+).mp3$" = "_dummy_", "album", "order", "artist", "title"
+
+  # Sting.Desert_Rose-04-Brand_New_Day_Murlyn_Mix.mp3
+  ".*\/(\S+?)\.(\S+?)-(\d+)-(\S+).mp3$" = "artist", "album", "order", "title" 
+}
+
+# ALWAYSTEMPLATES
+#
+# always use FILETEMPLATES (ignore mp3 tags)
+
+ALWAYSTEMPLATES = 0
+
+# BACKUPDIR
+#
+# dir for iTunesDB backups
+
+BACKUPDIR = "~/.ipod/backup"
+
